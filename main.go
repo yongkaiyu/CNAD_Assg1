@@ -15,17 +15,18 @@ type User struct {
 	Name           string    `json:"name"`
 	Email          string    `json:"email"`
 	PhoneNo        string    `json:"phone_no"`
-	PasswordHash   string    `json:"password_hash"`
+	Password   	   string    `json:"password"`
 	MembershipTier string    `json:"membership_tier"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
-const (
-	MembershipTierBasic   = "Basic"
-	MembershipTierPremium = "Premium"
-	MembershipTierVIP     = "VIP"
-)
+type MembershipBenefits struct {
+	Tier           string  `json:"tier"`
+	HourlyRate     float64 `json:"hourly_rate"`
+	PriorityAccess bool    `json:"priority_access"`
+	BookingLimit   int     `json:"booking_limit"`
+}
 
 type Vehicle struct {
 	VehicleID    int       `json:"vehicle_id"`
