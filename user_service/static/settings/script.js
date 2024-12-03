@@ -6,7 +6,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
     if (!userId || !userName || !userEmail) {
         alert("No user data found. Please log in.");
-        window.location.href = "/login.html"; // Redirect to login page if no data
+        window.location.href = "../home"; // Redirect to login page if no data
     }
 
     // Trim and sanitize userId so it wont be 1:1 but 1 instead

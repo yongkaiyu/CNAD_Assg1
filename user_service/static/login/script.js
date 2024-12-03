@@ -27,7 +27,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     localStorage.setItem("userEmail", userData.email);
                     localStorage.setItem("userPhone", userData.phone);
                     alert("Login successful!");
-                    window.location.href = "../../static/home"
+                    window.location.href = "../home"
                 } else {
                     alert("Login failed: " + response.statusText);
                 }

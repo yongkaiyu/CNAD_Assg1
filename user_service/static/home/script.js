@@ -12,7 +12,7 @@ document.addEventListener("DOMContentLoaded", () => {
         `;
     } else {
         alert("No user data found. Please log in.");
-        window.location.href = "../../static/login"; // Redirect to login page if no data
+        window.location.href = "../login"; // Redirect to login page if no data
         return
     }
 
@@ -22,13 +22,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (settingsButton) {
         settingsButton.addEventListener("click", () => {
-            window.location.href = "../../static/settings";
+            window.location.href = "../settings";
         });
     }
 
     if (historyButton) {
         historyButton.addEventListener("click", () => {
-            window.location.href = "../../static/history";
+            window.location.href = "../history";
         });
     }
 });

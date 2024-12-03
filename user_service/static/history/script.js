@@ -1,6 +1,6 @@
 document.addEventListener('DOMContentLoaded', function() {
     // Get the userId from localStorage
-    const userId = localStorage.getItem('userId');
+    let userId = localStorage.getItem('userId');
 
     // Trim and sanitize userId so it wont be 1:1 but 1 instead
     if (userId) {
