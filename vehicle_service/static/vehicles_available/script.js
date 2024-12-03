@@ -9,8 +9,23 @@ document.addEventListener('DOMContentLoaded', () => {
 async function fetchVehicles() {
     try {
         
-        const response = await fetch('/api/v1/booking/vehicles');
+        const response = await fetch('/api/v1/booking/vehicles', {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        });
+        
+        // Check if the response is successful
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Error fetching vehicles');
+        }
+
         const vehicles = await response.json();
+
+        // Debug: Check what we're receiving as vehicles
+        console.log('Received vehicles:', vehicles);
 
         const vehicleList = document.getElementById('vehicle-list');
         vehicleList.innerHTML = ''; // Clear existing list
@@ -33,9 +48,9 @@ async function fetchVehicles() {
             const details = document.createElement('div');
             details.className = 'vehicle-details';
             details.innerHTML = `
-                <strong>License Plate:</strong> ${vehicle.licensePlate}<br>
+                <strong>License Plate:</strong> ${vehicle.license_plate}<br>
                 <strong>Location:</strong> ${vehicle.location}<br>
-                <strong>Charge Level:</strong> ${vehicle.chargeLevel}%<br>
+                <strong>Charge Level:</strong> ${vehicle.charge_level}%<br>
                 <strong>Status:</strong> ${vehicle.status}<br>
             `;
             vehicleContainer.appendChild(details);
@@ -49,14 +64,22 @@ async function fetchVehicles() {
             // Append container to the list
             vehicleList.appendChild(vehicleContainer);
 
-            bookButton.onclick = () => redirectToBooking(vehicle.id);
+            bookButton.onclick = () => redirectToBooking(vehicle);
         });
     } catch (error) {
         console.error('Error fetching vehicles:', error);
+        // Handle the error gracefully on the frontend
+        const vehicleList = document.getElementById('vehicle-list');
+        vehicleList.innerHTML = `<p>Error: ${error.message}</p>`;
     }
 }
 
 // Redirect to booking page with vehicle ID
-function redirectToBooking(vehicleId) {
-    window.location.href = `../booking?vehicleId=${vehicleId}`;
+function redirectToBooking(vehicle) {
+    window.location.href = `../vehicle_booking/`;
+    localStorage.setItem("vehicleId",vehicle.vehicle_id)
 }
+
+/*function redirectToBooking(vehicleId) {
+    window.location.href = `../booking?vehicleId=${vehicleId}`;
+}*/

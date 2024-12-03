@@ -19,6 +19,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // Button redirects
     const settingsButton = document.getElementById("settingsButton");
     const historyButton = document.getElementById("historyButton");
+    const bookingsButton = document.getElementById("bookingsButton");
 
     if (settingsButton) {
         settingsButton.addEventListener("click", () => {
@@ -29,6 +30,12 @@ document.addEventListener("DOMContentLoaded", () => {
     if (historyButton) {
         historyButton.addEventListener("click", () => {
             window.location.href = "../history";
+        });
+    }
+
+    if (bookingsButton) {
+        bookingsButton.addEventListener("click", () => {
+            window.location.href = "../bookings_home/";
         });
     }
 });

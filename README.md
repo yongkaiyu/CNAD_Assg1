@@ -1,4 +1,3 @@
-# CNAD_Assg1
 Header: CNAD Assg 1 Submission
 
 go get -u github.com/gorilla/mux

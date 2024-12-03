@@ -1,5 +1,6 @@
 document.addEventListener("DOMContentLoaded", async () => {
     const userId = localStorage.getItem("userId");
+    const messageContainer = document.getElementById("message-container");
     if (!userId) {
         alert("User not logged in!");
         return;
@@ -12,10 +13,19 @@ document.addEventListener("DOMContentLoaded", async () => {
 
         const vehicleList = document.getElementById("vehicle-list");
 
+        // Check if the server returned a "message" indicating no bookings
+        if (response.message) {
+            vehicleList.innerHTML = `<p>${response.message}</p>`;
+            return;
+        }
+
         if (bookedVehicles.length === 0) {
             vehicleList.innerHTML = "<p>No booked vehicles found.</p>";
             return;
         }
+
+        // Clear any previous message
+        messageContainer.innerHTML = "";
 
         // Display each booked vehicle
         bookedVehicles.forEach(vehicle => {
@@ -40,7 +50,8 @@ document.addEventListener("DOMContentLoaded", async () => {
             const modifyButton = document.createElement("button");
             modifyButton.className = "modify-button";
             modifyButton.textContent = "Modify Booking";
-            modifyButton.onclick = () => redirectToModifyBooking(vehicle.bookingId);
+            modifyButton.onclick = () => redirectToModifyBooking();
+            // modifyButton.onclick = () => redirectToModifyBooking(vehicle.bookingId);
 
             const deleteButton = document.createElement("button");
             deleteButton.className = "delete-button";
@@ -55,13 +66,29 @@ document.addEventListener("DOMContentLoaded", async () => {
         });
     } catch (error) {
         console.error("Error fetching booked vehicles:", error);
-        alert("An error occurred while loading booked vehicles.");
+        messageContainer.innerHTML = "<p>An error occurred while loading booked vehicles.</p>";
     }
 });
 
 // Redirect to Modify Booking Page
-function redirectToModifyBooking(bookingId) {
+function redirectToModifyBooking() {
+    window.location.href = `../vehicle_booking/`;
+}
+
+// Redirect to Modify Booking Page
+/* function redirectToModifyBooking(bookingId) {
     window.location.href = `/modify-booking.html?bookingId=${bookingId}`;
+} */
+
+// `/modify-booking.html?bookingId=${bookingId}`
+
+// Button redirects
+const viewAvailableVehiclesButton = document.getElementById("viewAvailableVehiclesButton");
+
+if (viewAvailableVehiclesButton) {
+    viewAvailableVehiclesButton.addEventListener("click", () => {
+        window.location.href = "../vehicles_available/";
+    });
 }
 
 // Delete Booking

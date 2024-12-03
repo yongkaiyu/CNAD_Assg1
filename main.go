@@ -38,7 +38,7 @@ type Vehicle struct {
 	VehicleID    int       `json:"vehicle_id"`
 	LicensePlate string    `json:"license_plate"`
 	Location     string    `json:"location"`
-	ChargeLevel  string    `json:"charge_level"`
+	ChargeLevel  int       `json:"charge_level"`
 	Status       string    `json:"status"`
 	Cleanliness  string    `json:"cleanliness"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -145,13 +145,32 @@ func main() {
 
 	// Serve static files from /static/{page}/ and route them to the corresponding service folder
 	router.HandleFunc("/static/{page}/", serveStaticPage)
-
-	router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("./user_service/static/"))))
-	router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("./vehicle_service/static/"))))
-	router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("./billing_service/static/"))))
+	router.HandleFunc("/static/{page}/{file}", serveStaticFile) // Serve JS/CSS files
 
 	fmt.Println("Listening at port 5000")
 	log.Fatal(http.ListenAndServe(":5000", router))
+}
+
+func serveStaticFile(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	page := vars["page"]
+	file := vars["file"]
+
+	// Determine the base path for the requested page
+	var filePath string
+	switch page {
+	case "login", "signup", "home", "settings", "history":
+		filePath = "./user_service/static/" + page + "/" + file
+	case "vehicles_available", "vehicle_booking", "bookings_home":
+		filePath = "./vehicle_service/static/" + page + "/" + file
+	case "billing_history", "payment":
+		filePath = "./billing_service/static/" + page + "/" + file
+	default:
+		http.NotFound(w, r)
+		return
+	}
+
+	http.ServeFile(w, r, filePath)
 }
 
 // Function to serve static pages dynamically from different services
@@ -366,7 +385,6 @@ func userProfileHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("Connected to database: %v", db)
 		var membershipTier string
 		query := "SELECT membership_tier FROM users WHERE user_id = ?"
 		err := db.QueryRow(query, userID).Scan(&membershipTier)
@@ -561,24 +579,69 @@ func rentalHistoryHandler(w http.ResponseWriter, r *http.Request) {
 
 func availableVehiclesHandler(w http.ResponseWriter, r *http.Request) {
 
-	rows, err := db.Query("SELECT vehicle_id, license_plate, location, charge_level, status, cleanliness, created_at, updated_at FROM vehicles WHERE status = 'Available' AND charge_level >= 20")
+	rows, err := db.Query(`SELECT vehicle_id, license_plate, location, charge_level, status, cleanliness, created_at, updated_at FROM vehicles WHERE status = "Available" AND charge_level >= 20`)
 	if err != nil {
 		http.Error(w, "Error fetching vehicles", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 
-	var vehicles []Vehicle
+	var vehicles []map[string]interface{}
 	for rows.Next() {
-		var vehicle Vehicle
-		err := rows.Scan(&vehicle.VehicleID, &vehicle.LicensePlate, &vehicle.Location, &vehicle.ChargeLevel, &vehicle.Status, &vehicle.Cleanliness, &vehicle.CreatedAt, &vehicle.UpdatedAt)
-		if err != nil {
-			http.Error(w, "Error scanning data", http.StatusInternalServerError)
+		var vehicleID, licensePlate, location, status, cleanliness, createdAtStr, updatedAtStr string
+		var chargeLevel int
+
+		if err := rows.Scan(&vehicleID, &licensePlate, &location, &chargeLevel, &status, &cleanliness, &createdAtStr, &updatedAtStr); err != nil {
+			log.Printf("Row scan error: %v", err)
+			http.Error(w, "Error scanning vehicle data", http.StatusInternalServerError)
 			return
 		}
+
+		// Parse created_at and updated_at strings into time.Time
+		createdAt, err := time.Parse("2006-01-02 15:04:05", createdAtStr)
+		if err != nil {
+			log.Printf("Error parsing created_at: %v", err)
+			http.Error(w, "Error parsing created at time", http.StatusInternalServerError)
+			return
+		}
+
+		updatedAt, err := time.Parse("2006-01-02 15:04:05", updatedAtStr)
+		if err != nil {
+			log.Printf("Error parsing updated_at: %v", err)
+			http.Error(w, "Error parsing updated at time", http.StatusInternalServerError)
+			return
+		}
+
+		// Format time.Time back into string for response (you can add GMT +8 if necessary)
+		formattedCreatedAt := createdAt.Format("2006-01-02 15:04:05")
+		formattedUpdatedAt := updatedAt.Format("2006-01-02 15:04:05")
+
+		// Log the vehicle details
+		log.Printf("Vehicle ID: %s, License Plate: %s, Location: %s, Charge Level: %d, Status: %s, Cleanliness: %s, Created At: %s, Updated At: %s",
+			vehicleID, licensePlate, location, chargeLevel, status, cleanliness, formattedCreatedAt, formattedUpdatedAt)
+
+		vehicle := map[string]interface{}{
+			"vehicle_id":    vehicleID,
+			"license_plate": licensePlate,
+			"location":      location,
+			"charge_level":  chargeLevel,
+			"status":        status,
+			"cleanliness":   cleanliness,
+			"created_at":    formattedCreatedAt,
+			"updated_at":    formattedUpdatedAt,
+		}
+
 		vehicles = append(vehicles, vehicle)
 	}
 
+	if len(vehicles) == 0 {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode([]map[string]interface{}{})
+		return
+	}
+
+	// Set content-type to application/json
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(vehicles)
 }
 
@@ -590,11 +653,17 @@ func getBookedVehiclesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	userIDInt, err := strconv.Atoi(userID)
+	if err != nil {
+		http.Error(w, "Invalid user ID format", http.StatusBadRequest)
+		return
+	}
+
 	// Query the database to fetch vehicles booked by the user
 	query := `
         SELECT 
-            b.id AS bookingId,
-            v.id AS vehicleId, 
+            b.booking_id AS bookingId,
+            v.vehicle_id AS vehicleId, 
             v.license_plate AS licensePlate, 
             v.location, 
             v.charge_level AS chargeLevel, 
@@ -604,11 +673,13 @@ func getBookedVehiclesHandler(w http.ResponseWriter, r *http.Request) {
         FROM 
             bookings b
         INNER JOIN 
-            vehicles v ON b.vehicle_id = v.id
+            vehicles v ON b.vehicle_id = v.vehicle_id
         WHERE 
-            b.user_id = ?
+            b.user_id = ? AND b.status = "Active"
+		ORDER BY
+			b.start_time ASC
     `
-	rows, err := db.Query(query, userID)
+	rows, err := db.Query(query, userIDInt)
 	if err != nil {
 		http.Error(w, "Error fetching booked vehicles", http.StatusInternalServerError)
 		return
@@ -617,6 +688,10 @@ func getBookedVehiclesHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Collect the results
 	var bookedVehicles []BookedVehicle
+
+	log.Println("Starting to iterate rows")
+	log.Printf("Executing query with userID: %s", userID)
+
 	for rows.Next() {
 		var vehicle BookedVehicle
 		if err := rows.Scan(&vehicle.BookingID, &vehicle.VehicleID, &vehicle.LicensePlate, &vehicle.Location, &vehicle.ChargeLevel, &vehicle.Status, &vehicle.StartTime, &vehicle.EndTime); err != nil {
@@ -628,6 +703,18 @@ func getBookedVehiclesHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Convert results to JSON and send the response
 	w.Header().Set("Content-Type", "application/json")
+
+	// Check if booked vehicles is empty
+	if len(bookedVehicles) == 0 {
+		response := map[string]string{
+			"message": "No booked vehicles found",
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			http.Error(w, "Error encoding response", http.StatusInternalServerError)
+		}
+		return
+	}
+
 	if err := json.NewEncoder(w).Encode(bookedVehicles); err != nil {
 		http.Error(w, "Error encoding response", http.StatusInternalServerError)
 	}
@@ -641,10 +728,14 @@ func vehicleBookingHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var booking Booking
+
 	if err := json.NewDecoder(r.Body).Decode(&booking); err != nil {
 		http.Error(w, "Invalid input", http.StatusBadRequest)
 		return
 	}
+
+	// Log the decoded booking
+	log.Printf("Received booking: %+v", booking)
 
 	_, err := db.Exec(`
         INSERT INTO bookings (user_id, vehicle_id, start_time, end_time, total_cost)
@@ -662,6 +753,7 @@ func vehicleBookingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Vehicle booked successfully"})
 }

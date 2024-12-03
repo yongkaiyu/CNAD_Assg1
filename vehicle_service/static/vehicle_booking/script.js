@@ -1,7 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
     // Get vehicle ID from query parameters
-    const urlParams = new URLSearchParams(window.location.search);
-    const vehicleId = urlParams.get('vehicleId');
+    const vehicleId = localStorage.getItem('vehicleId');
 
     // Get user ID from localStorage
     const userId = localStorage.getItem('userId');
@@ -39,20 +38,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             // Send booking data to the server
-            const response = await fetch('/api/v1/booking', {
+            const response = await fetch('/api/v1/booking/booking', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
+                    'userId': userId, // Include the userId from localStorage
                 },
                 body: JSON.stringify(bookingData),
             });
 
+            console.log('Booking data being sent:', bookingData);
+
+            const responseText = await response.text(); // Get raw response as text
+            console.log('Raw server response:', responseText);
+
+            // Parse JSON only if the response is successful
             if (response.ok) {
+                const responseData = JSON.parse(responseText); // Convert to JSON
                 alert('Booking confirmed!');
-                // Optionally, redirect to another page
-                window.location.href = '../bookings_home';
+                window.location.href = '../bookings_home/';
             } else {
-                const errorData = await response.json();
+                const errorData = JSON.parse(responseText); // Handle error as JSON
                 alert(`Booking failed: ${errorData.message}`);
             }
         } catch (error) {
