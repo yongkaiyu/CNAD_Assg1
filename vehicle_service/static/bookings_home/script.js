@@ -50,13 +50,14 @@ document.addEventListener("DOMContentLoaded", async () => {
             const modifyButton = document.createElement("button");
             modifyButton.className = "modify-button";
             modifyButton.textContent = "Modify Booking";
-            modifyButton.onclick = () => redirectToModifyBooking();
+            modifyButton.onclick = () => redirectToModifyBooking(vehicle.bookingId, vehicle.vehicleId);
             // modifyButton.onclick = () => redirectToModifyBooking(vehicle.bookingId);
 
             const deleteButton = document.createElement("button");
             deleteButton.className = "delete-button";
             deleteButton.textContent = "Delete Booking";
             deleteButton.onclick = () => deleteBooking(vehicle.bookingId);
+            // deleteButton.onclick = () => deleteBooking(vehicle.bookingId);
 
             actions.appendChild(modifyButton);
             actions.appendChild(deleteButton);
@@ -71,8 +72,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 // Redirect to Modify Booking Page
-function redirectToModifyBooking() {
-    window.location.href = `../vehicle_booking/`;
+function redirectToModifyBooking(bookingId, vehicleId) {
+    window.location.href = `../modify_booking/`;
+    localStorage.setItem("bookingId",bookingId)
+    localStorage.setItem("vehicleId",vehicleId)
 }
 
 // Redirect to Modify Booking Page
@@ -93,10 +96,24 @@ if (viewAvailableVehiclesButton) {
 
 // Delete Booking
 async function deleteBooking(bookingId) {
+
+    const userId = localStorage.getItem("userId");
+
+    if (!userId) {
+        alert("User is not logged in.");
+        return;
+    }
+
+    console.log(userId)
+
     if (confirm("Are you sure you want to cancel this booking?")) {
         try {
             const response = await fetch(`/api/v1/booking/cancel/${bookingId}`, {
                 method: "DELETE",
+                headers: {
+                    "Content-Type": "application/json",
+                    "userId": userId, // Include userId in headers
+                },
             });
 
             if (response.ok) {

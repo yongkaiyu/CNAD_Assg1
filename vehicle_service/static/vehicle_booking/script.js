@@ -9,6 +9,27 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('user-id').value = userId || 'Not logged in';
     document.getElementById('vehicle-id').value = vehicleId || 'Unknown vehicle';
 
+    // Format date to ISO 8601
+    const formatDateTime = (input) => {
+        const date = new Date(input);
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        const seconds = String(date.getSeconds()).padStart(2, '0');
+        
+        // Get the timezone offset in hours and minutes
+        //const timezoneOffset = date.getTimezoneOffset();
+        //const offsetSign = timezoneOffset > 0 ? '-' : '+';
+        //const offsetHours = String(Math.abs(Math.floor(timezoneOffset / 60))).padStart(2, '0');
+        //const offsetMinutes = String(Math.abs(timezoneOffset % 60)).padStart(2, '0');
+        
+        // Format in the required format
+        return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}Z`;
+    };
+    
+
     // Handle form submission
     const bookingForm = document.getElementById('booking-form');
     bookingForm.addEventListener('submit', async (event) => {
@@ -28,12 +49,25 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        // Convert userId and vehicleId to integers
+        const parsedUserId = parseInt(userId, 10);
+        const parsedVehicleId = parseInt(vehicleId, 10);
+
+        if (isNaN(parsedUserId) || isNaN(parsedVehicleId)) {
+            alert('Invalid ID values. Please check user and vehicle IDs.');
+            return;
+        }
+
+        // Format times to "YYYY-MM-DD HH:MM:SS"
+        const formattedStartTime = formatDateTime(startTime);
+        const formattedEndTime = formatDateTime(endTime);
+
         // Create booking object
         const bookingData = {
-            user_id: userId,
-            vehicle_id: vehicleId,
-            start_time: startTime,
-            end_time: endTime,
+            user_id: parsedUserId,
+            vehicle_id: parsedVehicleId,
+            start_time: formattedStartTime,
+            end_time: formattedEndTime,
         };
 
         try {

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -13,6 +14,10 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/gorilla/mux"
+	"github.com/jung-kurt/gofpdf"
+	"github.com/stripe/stripe-go"
+	"github.com/stripe/stripe-go/paymentintent"
+	"github.com/stripe/stripe-go/refund"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -29,7 +34,7 @@ type User struct {
 
 type MembershipBenefits struct {
 	Tier           string  `json:"tier"`
-	HourlyRate     float64 `json:"hourly_rate"`
+	DiscountRate   float64 `json:"discount_rate"`
 	PriorityAccess bool    `json:"priority_access"`
 	BookingLimit   int     `json:"booking_limit"`
 }
@@ -139,8 +144,8 @@ func main() {
 	router.HandleFunc("/api/v1/booking/vehicles", availableVehiclesHandler)
 	router.HandleFunc("/api/v1/booking/bookings", getBookedVehiclesHandler)
 	router.HandleFunc("/api/v1/booking/booking", vehicleBookingHandler)
-	router.HandleFunc("/api/v1/booking/modify", modifyBookingHandler)
-	router.HandleFunc("/api/v1/booking/cancel", cancelBookingHandler)
+	router.HandleFunc("/api/v1/booking/modify/{bookingId}", modifyBookingHandler).Methods("PUT")
+	router.HandleFunc("/api/v1/booking/cancel/{bookingId}", cancelBookingHandler).Methods("DELETE")
 	router.HandleFunc("/api/v1/booking/status", updateVehicleStatusHandler)
 
 	// Serve static files from /static/{page}/ and route them to the corresponding service folder
@@ -161,7 +166,7 @@ func serveStaticFile(w http.ResponseWriter, r *http.Request) {
 	switch page {
 	case "login", "signup", "home", "settings", "history":
 		filePath = "./user_service/static/" + page + "/" + file
-	case "vehicles_available", "vehicle_booking", "bookings_home":
+	case "vehicles_available", "vehicle_booking", "bookings_home", "modify_booking":
 		filePath = "./vehicle_service/static/" + page + "/" + file
 	case "billing_history", "payment":
 		filePath = "./billing_service/static/" + page + "/" + file
@@ -184,7 +189,7 @@ func serveStaticPage(w http.ResponseWriter, r *http.Request) {
 	switch page {
 	case "login", "signup", "home", "settings", "history":
 		filePath = "./user_service/static/" + page + "/index.html"
-	case "vehicles_available", "vehicle_booking", "bookings_home":
+	case "vehicles_available", "vehicle_booking", "bookings_home", "modify_booking":
 		filePath = "./vehicle_service/static/" + page + "/index.html"
 	case "billing_history", "payment":
 		filePath = "./billing_service/static/" + page + "/index.html"
@@ -352,7 +357,7 @@ func membershipBenefitsHandler(w http.ResponseWriter, r *http.Request) {
 	var benefits MembershipBenefits
 	query2 := "SELECT * FROM membershipbenefits WHERE tier = ?"
 	err2 := db.QueryRow(query2, membershipTier).Scan(
-		&benefits.Tier, &benefits.HourlyRate, &benefits.PriorityAccess, &benefits.BookingLimit)
+		&benefits.Tier, &benefits.DiscountRate, &benefits.PriorityAccess, &benefits.BookingLimit)
 	if err2 != nil {
 		if err2 == sql.ErrNoRows {
 			http.Error(w, "Membership tier not found", http.StatusNotFound)
@@ -729,19 +734,41 @@ func vehicleBookingHandler(w http.ResponseWriter, r *http.Request) {
 
 	var booking Booking
 
-	if err := json.NewDecoder(r.Body).Decode(&booking); err != nil {
+	/* if err := json.NewDecoder(r.Body).Decode(&booking); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	} */
+
+	// Log raw request body for debugging
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("Error reading request body: %v", err)
+		http.Error(w, "Invalid input", http.StatusBadRequest)
+		return
+	}
+	log.Printf("Raw request body: %s", string(body))
+
+	// Decode the JSON request into booking
+	if err := json.Unmarshal(body, &booking); err != nil {
+		log.Printf("Error decoding JSON: %v", err)
 		http.Error(w, "Invalid input", http.StatusBadRequest)
 		return
 	}
 
+	// Log the decoded booking for debugging
+	log.Printf("Decoded booking: %+v", booking)
+
+	// Set total_cost to 10.00
+	fixedCost := 10.00
+
 	// Log the decoded booking
 	log.Printf("Received booking: %+v", booking)
 
-	_, err := db.Exec(`
+	_, err2 := db.Exec(`
         INSERT INTO bookings (user_id, vehicle_id, start_time, end_time, total_cost)
         VALUES (?, ?, ?, ?, ?)`,
-		userId, booking.VehicleID, booking.StartTime, booking.EndTime, booking.TotalCost)
-	if err != nil {
+		userId, booking.VehicleID, booking.StartTime, booking.EndTime, fixedCost)
+	if err2 != nil {
 		http.Error(w, "Error booking vehicle", http.StatusInternalServerError)
 		return
 	}
@@ -760,45 +787,128 @@ func vehicleBookingHandler(w http.ResponseWriter, r *http.Request) {
 
 func modifyBookingHandler(w http.ResponseWriter, r *http.Request) {
 	userId := r.Header.Get("userId")
-	var booking Booking
-	if err := json.NewDecoder(r.Body).Decode(&booking); err != nil {
-		http.Error(w, "Invalid input", http.StatusBadRequest)
+	vehicleId := r.Header.Get("vehicleId")
+
+	vars := mux.Vars(r) // Extract path variables
+	bookingID := vars["bookingId"]
+
+	if userId == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	_, err := db.Exec(`
-        UPDATE bookings
-        SET start_time = ?, end_time = ?, total_cost = ?
+	if bookingID == "" {
+		http.Error(w, "Booking ID is required", http.StatusBadRequest)
+		return
+	}
+
+	if vehicleId == "" {
+		http.Error(w, "Vehicle ID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse and decode the request body
+	//var booking Booking
+	var input struct {
+		StartTime string `json:"startTime"`
+		EndTime   string `json:"endTime"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "Invalid input", http.StatusBadRequest)
+		log.Printf("Error decoding input: %v", err)
+		return
+	}
+
+	// Fetch current booking details
+	var currentStartTime, currentEndTime string
+	err := db.QueryRow(`
+        SELECT start_time, end_time 
+        FROM bookings 
         WHERE booking_id = ? AND user_id = ?`,
-		booking.StartTime, booking.EndTime, booking.TotalCost, booking.BookingID, userId)
+		bookingID, userId).Scan(&currentStartTime, &currentEndTime)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "Booking not found or unauthorized", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "Error fetching current booking details", http.StatusInternalServerError)
+		log.Printf("Error fetching booking details: %v", err)
+		return
+	}
+
+	log.Printf("Current values - Start Time: %s, End Time: %s", currentStartTime, currentEndTime)
+
+	// Check if values are the same
+	if input.StartTime == currentStartTime && input.EndTime == currentEndTime {
+		http.Error(w, "No changes detected in booking details", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("Updating booking - Booking ID: %s, User ID: %s, Start Time: %s, End Time: %s",
+		bookingID, userId, input.StartTime, input.EndTime)
+
+	result, err := db.Exec(`
+        UPDATE bookings
+        SET start_time = ?, end_time = ?
+        WHERE booking_id = ? AND user_id = ?`,
+		input.StartTime, input.EndTime, bookingID, userId)
 	if err != nil {
 		http.Error(w, "Error modifying booking", http.StatusInternalServerError)
 		return
 	}
 
+	// Check if any rows were affected
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		http.Error(w, "Error checking update result", http.StatusInternalServerError)
+		log.Printf("Error retrieving affected rows: %v", err)
+		return
+	}
+	if rowsAffected == 0 {
+		http.Error(w, "No changes made to the booking. Check input values.", http.StatusBadRequest)
+		log.Printf("No rows updated for booking_id: %s, user_id: %s", bookingID, userId)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Booking modified successfully"})
 }
 
 func cancelBookingHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Headers: %v", r.Header) // Log all headers to inspect
 	userId := r.Header.Get("userId")
-	bookingID := r.URL.Query().Get("bookingId")
+	vars := mux.Vars(r) // Extract path variables
+	bookingID := vars["bookingId"]
 
-	_, err := db.Exec(`DELETE FROM bookings WHERE booking_id = ? AND user_id = ?`, bookingID, userId)
+	log.Printf("userID is %s", userId)
+
+	if userId == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if bookingID == "" {
+		http.Error(w, "Booking ID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Update vehicle status to 'Available'
+	_, err := db.Exec(`UPDATE vehicles SET status = "Available" WHERE vehicle_id = (
+        SELECT vehicle_id FROM bookings WHERE booking_id = ?
+    )`, bookingID)
 	if err != nil {
 		http.Error(w, "Error canceling booking", http.StatusInternalServerError)
 		return
 	}
 
-	// Optionally update vehicle status to 'Available'
-	_, err = db.Exec(`UPDATE vehicles SET status = 'Available' WHERE id = (
-        SELECT vehicle_id FROM bookings WHERE booking_id = ?
-    )`, bookingID)
+	_, err = db.Exec(`DELETE FROM bookings WHERE booking_id = ? AND user_id = ?`, bookingID, userId)
 	if err != nil {
 		http.Error(w, "Error updating vehicle status", http.StatusInternalServerError)
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Booking cancelled successfully"})
 }
@@ -822,4 +932,59 @@ func updateVehicleStatusHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Vehicle status updated successfully"})
+}
+
+func ProcessPayment(amount int, paymentMethodID string) (string, error) {
+	stripe.Key = "sk_test_4eC39HqLyjWDarjtT1zdp7dc" // Set your Stripe Secret Key
+
+	params := &stripe.PaymentIntentParams{
+		Amount:        stripe.Int64(int64(amount)),
+		Currency:      stripe.String(string(stripe.CurrencyUSD)),
+		PaymentMethod: stripe.String(paymentMethodID),
+		Confirm:       stripe.Bool(true),
+	}
+
+	paymentIntent, err := paymentintent.New(params)
+	if err != nil {
+		return "", err
+	}
+
+	return paymentIntent.ID, nil
+}
+
+func RefundPayment(paymentIntentID string) (string, error) {
+	params := &stripe.RefundParams{
+		PaymentIntent: stripe.String(paymentIntentID),
+	}
+
+	refund, err := refund.New(params)
+	if err != nil {
+		return "", err
+	}
+
+	return refund.ID, nil
+}
+
+func GenerateInvoice(rentalID int, totalAmount float64) error {
+	pdf := gofpdf.New("P", "mm", "A4", "")
+	pdf.AddPage()
+
+	pdf.SetFont("Arial", "B", 16)
+	pdf.Cell(40, 10, "Invoice")
+	pdf.Ln(10)
+
+	// Add rental and cost details
+	pdf.SetFont("Arial", "", 12)
+	pdf.Cell(40, 10, fmt.Sprintf("Rental ID: %d", rentalID))
+	pdf.Ln(10)
+	pdf.Cell(40, 10, fmt.Sprintf("Total Amount: $%.2f", totalAmount))
+
+	// Save or email the PDF
+	err := pdf.OutputFileAndClose(fmt.Sprintf("invoices/%d_invoice.pdf", rentalID))
+	if err != nil {
+		return err
+	}
+
+	// You can also send this file via email to the user using your email service
+	return nil
 }
