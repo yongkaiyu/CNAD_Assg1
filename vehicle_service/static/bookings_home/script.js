@@ -40,7 +40,8 @@ document.addEventListener("DOMContentLoaded", async () => {
                 <strong>Charge Level:</strong> ${vehicle.chargeLevel}%<br>
                 <strong>Booking ID:</strong> ${vehicle.bookingId}<br>
                 <strong>Start Time:</strong> ${vehicle.startTime}<br>
-                <strong>End Time:</strong> ${vehicle.endTime}
+                <strong>End Time:</strong> ${vehicle.endTime}<br>
+                <strong>Total Amount:</strong> $${vehicle.totalAmount.toFixed(2)}<br>
             `;
             vehicleContainer.appendChild(details);
 

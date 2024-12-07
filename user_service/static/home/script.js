@@ -20,6 +20,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const settingsButton = document.getElementById("settingsButton");
     const historyButton = document.getElementById("historyButton");
     const bookingsButton = document.getElementById("bookingsButton");
+    const billingsButton = document.getElementById("billingsButton");
 
     if (settingsButton) {
         settingsButton.addEventListener("click", () => {
@@ -36,6 +37,12 @@ document.addEventListener("DOMContentLoaded", () => {
     if (bookingsButton) {
         bookingsButton.addEventListener("click", () => {
             window.location.href = "../bookings_home/";
+        });
+    }
+
+    if (billingsButton) {
+        billingsButton.addEventListener("click", () => {
+            window.location.href = "../billings_home/";
         });
     }
 });

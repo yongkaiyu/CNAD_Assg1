@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -14,10 +15,10 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/gorilla/mux"
-	"github.com/jung-kurt/gofpdf"
-	"github.com/stripe/stripe-go"
-	"github.com/stripe/stripe-go/paymentintent"
-	"github.com/stripe/stripe-go/refund"
+	_ "github.com/jung-kurt/gofpdf"
+	_ "github.com/stripe/stripe-go"
+	_ "github.com/stripe/stripe-go/paymentintent"
+	_ "github.com/stripe/stripe-go/refund"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -63,14 +64,15 @@ const (
 )
 
 type BookedVehicle struct {
-	BookingID    int    `json:"bookingId"`
-	VehicleID    int    `json:"vehicleId"`
-	LicensePlate string `json:"licensePlate"`
-	Location     string `json:"location"`
-	ChargeLevel  int    `json:"chargeLevel"`
-	Status       string `json:"status"`
-	StartTime    string `json:"startTime"`
-	EndTime      string `json:"endTime"`
+	BookingID    int     `json:"bookingId"`
+	VehicleID    int     `json:"vehicleId"`
+	LicensePlate string  `json:"licensePlate"`
+	Location     string  `json:"location"`
+	ChargeLevel  int     `json:"chargeLevel"`
+	Status       string  `json:"status"`
+	StartTime    string  `json:"startTime"`
+	EndTime      string  `json:"endTime"`
+	TotalAmount  float64 `json:"totalAmount"`
 }
 
 type Booking struct {
@@ -148,6 +150,8 @@ func main() {
 	router.HandleFunc("/api/v1/booking/cancel/{bookingId}", cancelBookingHandler).Methods("DELETE")
 	router.HandleFunc("/api/v1/booking/status", updateVehicleStatusHandler)
 
+	router.HandleFunc("/api/v1/billing/bills", fetchBillingHandler)
+
 	// Serve static files from /static/{page}/ and route them to the corresponding service folder
 	router.HandleFunc("/static/{page}/", serveStaticPage)
 	router.HandleFunc("/static/{page}/{file}", serveStaticFile) // Serve JS/CSS files
@@ -168,7 +172,7 @@ func serveStaticFile(w http.ResponseWriter, r *http.Request) {
 		filePath = "./user_service/static/" + page + "/" + file
 	case "vehicles_available", "vehicle_booking", "bookings_home", "modify_booking":
 		filePath = "./vehicle_service/static/" + page + "/" + file
-	case "billing_history", "payment":
+	case "billings_home", "payment":
 		filePath = "./billing_service/static/" + page + "/" + file
 	default:
 		http.NotFound(w, r)
@@ -191,7 +195,7 @@ func serveStaticPage(w http.ResponseWriter, r *http.Request) {
 		filePath = "./user_service/static/" + page + "/index.html"
 	case "vehicles_available", "vehicle_booking", "bookings_home", "modify_booking":
 		filePath = "./vehicle_service/static/" + page + "/index.html"
-	case "billing_history", "payment":
+	case "billings_home", "payment":
 		filePath = "./billing_service/static/" + page + "/index.html"
 	default:
 		http.Error(w, "Page not found", http.StatusNotFound)
@@ -674,11 +678,14 @@ func getBookedVehiclesHandler(w http.ResponseWriter, r *http.Request) {
             v.charge_level AS chargeLevel, 
             v.status, 
             b.start_time AS startTime, 
-            b.end_time AS endTime 
+            b.end_time AS endTime,
+			bi.total_amount AS totalAmount
         FROM 
             bookings b
         INNER JOIN 
             vehicles v ON b.vehicle_id = v.vehicle_id
+		LEFT JOIN 
+        	billings bi ON b.booking_id = bi.booking_id
         WHERE 
             b.user_id = ? AND b.status = "Active"
 		ORDER BY
@@ -699,7 +706,7 @@ func getBookedVehiclesHandler(w http.ResponseWriter, r *http.Request) {
 
 	for rows.Next() {
 		var vehicle BookedVehicle
-		if err := rows.Scan(&vehicle.BookingID, &vehicle.VehicleID, &vehicle.LicensePlate, &vehicle.Location, &vehicle.ChargeLevel, &vehicle.Status, &vehicle.StartTime, &vehicle.EndTime); err != nil {
+		if err := rows.Scan(&vehicle.BookingID, &vehicle.VehicleID, &vehicle.LicensePlate, &vehicle.Location, &vehicle.ChargeLevel, &vehicle.Status, &vehicle.StartTime, &vehicle.EndTime, &vehicle.TotalAmount); err != nil {
 			http.Error(w, "Error scanning booked vehicles", http.StatusInternalServerError)
 			return
 		}
@@ -734,11 +741,6 @@ func vehicleBookingHandler(w http.ResponseWriter, r *http.Request) {
 
 	var booking Booking
 
-	/* if err := json.NewDecoder(r.Body).Decode(&booking); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	} */
-
 	// Log raw request body for debugging
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -758,13 +760,70 @@ func vehicleBookingHandler(w http.ResponseWriter, r *http.Request) {
 	// Log the decoded booking for debugging
 	log.Printf("Decoded booking: %+v", booking)
 
+	// Fetch the user's membership tier
+	var membershipTier string
+	err = db.QueryRow(`SELECT membership_tier FROM users WHERE user_id = ?`, userId).Scan(&membershipTier)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			log.Printf("User not found: %v", userId)
+			http.Error(w, "User not found", http.StatusNotFound)
+			return
+		}
+		log.Printf("Error fetching membership tier: %v", err)
+		http.Error(w, "Error fetching user data", http.StatusInternalServerError)
+		return
+	}
+
+	// Fetch the discount rate for the membership tier
+	var discountRate float64
+	err = db.QueryRow(`SELECT discount_rate FROM membershipbenefits WHERE tier = ?`, membershipTier).Scan(&discountRate)
+	if err != nil {
+		log.Printf("Error fetching discount rate: %v", err)
+		http.Error(w, "Error fetching membership benefits", http.StatusInternalServerError)
+		return
+	}
+
+	// Calculate the duration in hours, rounded up
+	duration := booking.EndTime.Sub(booking.StartTime).Hours()
+	hours := int(math.Ceil(duration))
+
 	// Set total_cost to 10.00
 	fixedCost := 10.00
+
+	// Calculate total amount
+	totalAmount := float64(hours) * fixedCost
 
 	// Log the decoded booking
 	log.Printf("Received booking: %+v", booking)
 
-	_, err2 := db.Exec(`
+	// Fetch discount_percentage from promotions table
+	var discountPercentage float64
+	err = db.QueryRow(`
+		SELECT discount_percentage 
+		FROM promotions 
+		WHERE expiry_date >= NOW() 
+		ORDER BY expiry_date ASC 
+		LIMIT 1`,
+	).Scan(&discountPercentage)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// No promotion found, discount remains 0
+			discountPercentage = 0.0
+		} else {
+			log.Printf("Error fetching discount: %v", err)
+			http.Error(w, "Error fetching promotion", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Apply discount from membership tier to the total amount
+	discountAmount := totalAmount * (discountRate / 100)
+	totalAmount -= discountAmount
+	// Apply discount from promotion to the total amount
+	discountAmount2 := totalAmount * (discountPercentage / 100)
+	totalAmount -= discountAmount2
+
+	result, err2 := db.Exec(`
         INSERT INTO bookings (user_id, vehicle_id, start_time, end_time, total_cost)
         VALUES (?, ?, ?, ?, ?)`,
 		userId, booking.VehicleID, booking.StartTime, booking.EndTime, fixedCost)
@@ -773,10 +832,29 @@ func vehicleBookingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Retrieve the booking ID of the newly inserted booking
+	bookingID, err := result.LastInsertId()
+	if err != nil {
+		log.Printf("Error retrieving booking ID: %v", err)
+		http.Error(w, "Error booking vehicle", http.StatusInternalServerError)
+		return
+	}
+
 	// Update vehicle status to 'Booked'
 	_, err = db.Exec(`UPDATE vehicles SET status = 'Booked' WHERE vehicle_id = ?`, booking.VehicleID)
 	if err != nil {
 		http.Error(w, "Error updating vehicle status", http.StatusInternalServerError)
+		return
+	}
+
+	// Insert a corresponding entry into the billing table
+	_, err = db.Exec(`
+        INSERT INTO billings (booking_id, total_amount)
+        VALUES (?, ?)`,
+		bookingID, totalAmount)
+	if err != nil {
+		log.Printf("Error inserting billing entry: %v", err)
+		http.Error(w, "Error creating billing entry", http.StatusInternalServerError)
 		return
 	}
 
@@ -847,29 +925,250 @@ func modifyBookingHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Updating booking - Booking ID: %s, User ID: %s, Start Time: %s, End Time: %s",
 		bookingID, userId, input.StartTime, input.EndTime)
 
-	result, err := db.Exec(`
-        UPDATE bookings
-        SET start_time = ?, end_time = ?
-        WHERE booking_id = ? AND user_id = ?`,
-		input.StartTime, input.EndTime, bookingID, userId)
+	// Fetch the user's membership tier
+	var membershipTier string
+	err = db.QueryRow(`SELECT membership_tier FROM users WHERE user_id = ?`, userId).Scan(&membershipTier)
 	if err != nil {
-		http.Error(w, "Error modifying booking", http.StatusInternalServerError)
+		if err == sql.ErrNoRows {
+			log.Printf("User not found: %v", userId)
+			http.Error(w, "User not found", http.StatusNotFound)
+			return
+		}
+		log.Printf("Error fetching membership tier: %v", err)
+		http.Error(w, "Error fetching user data", http.StatusInternalServerError)
 		return
 	}
 
-	// Check if any rows were affected
-	rowsAffected, err := result.RowsAffected()
+	// Fetch the discount rate for the membership tier
+	var discountRate float64
+	err = db.QueryRow(`SELECT discount_rate FROM membershipbenefits WHERE tier = ?`, membershipTier).Scan(&discountRate)
 	if err != nil {
-		http.Error(w, "Error checking update result", http.StatusInternalServerError)
-		log.Printf("Error retrieving affected rows: %v", err)
-		return
-	}
-	if rowsAffected == 0 {
-		http.Error(w, "No changes made to the booking. Check input values.", http.StatusBadRequest)
-		log.Printf("No rows updated for booking_id: %s, user_id: %s", bookingID, userId)
+		log.Printf("Error fetching discount rate: %v", err)
+		http.Error(w, "Error fetching membership benefits", http.StatusInternalServerError)
 		return
 	}
 
+	// Start here
+
+	// Parse current start and end times
+	startTime, err := time.Parse("2006-01-02 15:04:05", currentStartTime)
+	if err != nil {
+		http.Error(w, "Invalid stored start time format", http.StatusInternalServerError)
+		log.Printf("Error parsing stored start time: %v", err)
+		return
+	}
+
+	endTime, err := time.Parse("2006-01-02 15:04:05", currentEndTime)
+	if err != nil {
+		http.Error(w, "Invalid stored end time format", http.StatusInternalServerError)
+		log.Printf("Error parsing stored end time: %v", err)
+		return
+	}
+
+	// Get the current time
+	currentTime := time.Now()
+
+	// If the current time is before start time, allow modification of both start_time and end_time
+	if currentTime.Before(startTime) {
+		log.Println("Allowing modifications to start time and end time before the booking start time")
+	} else if currentTime.After(startTime) && currentTime.Before(endTime) {
+		// If current time is within the booking period, only allow modifications to end_time
+		log.Println("Allowing modifications to end time during the booking period")
+
+		// Ensure new end time is valid (after current time and start time)
+		newEndTime, err := time.Parse("2006-01-02 15:04:05", input.EndTime)
+		if err != nil {
+			http.Error(w, "Invalid end time format", http.StatusBadRequest)
+			log.Printf("Error parsing new end time: %v", err)
+			return
+		}
+
+		if newEndTime.Before(currentTime) || newEndTime.Before(startTime) {
+			http.Error(w, "End time must be after the current time and start time", http.StatusBadRequest)
+			return
+		}
+
+		// Calculate the new duration and total amount
+		duration := newEndTime.Sub(startTime).Hours()
+		hours := int(math.Ceil(duration))
+		if hours <= 0 {
+			http.Error(w, "Invalid duration calculated", http.StatusBadRequest)
+			return
+		}
+
+		fixedCost := 10.00
+		totalAmount := float64(hours) * fixedCost
+
+		// Fetch discount_percentage from promotions table
+		var discountPercentage float64
+		err = db.QueryRow(`
+			SELECT discount_percentage 
+			FROM promotions 
+			WHERE expiry_date >= NOW() 
+			ORDER BY expiry_date ASC 
+			LIMIT 1`,
+		).Scan(&discountPercentage)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				// No promotion found, discount remains 0
+				discountPercentage = 0.0
+			} else {
+				log.Printf("Error fetching discount: %v", err)
+				http.Error(w, "Error fetching promotion", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		// Apply discount from membership tier to the total amount
+		discountAmount := totalAmount * (discountRate / 100)
+		totalAmount -= discountAmount
+		// Apply discount from promotion to the total amount
+		discountAmount2 := totalAmount * (discountPercentage / 100)
+		totalAmount -= discountAmount2
+
+		// Update the booking with the new end time
+		result, err := db.Exec(`
+	        UPDATE bookings
+	        SET end_time = ?
+	        WHERE booking_id = ? AND user_id = ?`,
+			input.EndTime, bookingID, userId)
+		if err != nil {
+			http.Error(w, "Error modifying booking", http.StatusInternalServerError)
+			log.Printf("Error updating booking: %v", err)
+			return
+		}
+
+		// Check if any rows were affected
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			http.Error(w, "Error checking update result", http.StatusInternalServerError)
+			log.Printf("Error retrieving affected rows: %v", err)
+			return
+		}
+		if rowsAffected == 0 {
+			http.Error(w, "No changes made to the booking. Check input values.", http.StatusBadRequest)
+			log.Printf("No rows updated for booking_id: %s, user_id: %s", bookingID, userId)
+			return
+		}
+
+		// Update the billing record
+		_, err = db.Exec(`
+	        UPDATE billings
+	        SET total_amount = ?
+	        WHERE booking_id = ?`,
+			totalAmount, bookingID)
+		if err != nil {
+			http.Error(w, "Error updating billing entry", http.StatusInternalServerError)
+			log.Printf("Error updating billing record: %v", err)
+			return
+		}
+
+	} else {
+		http.Error(w, "Modifications are not allowed outside the booking period", http.StatusBadRequest)
+		log.Printf("Modification attempt outside booking period: bookingID=%s, userID=%s", bookingID, userId)
+		return
+	}
+
+	// If the user is modifying start_time before the start of the booking, validate and process the update
+	if currentTime.Before(startTime) {
+		// Parse new start and end times
+		newStartTime, err := time.Parse("2006-01-02 15:04:05", input.StartTime)
+		if err != nil {
+			http.Error(w, "Invalid start time format", http.StatusBadRequest)
+			log.Printf("Error parsing new start time: %v", err)
+			return
+		}
+
+		newEndTime, err := time.Parse("2006-01-02 15:04:05", input.EndTime)
+		if err != nil {
+			http.Error(w, "Invalid end time format", http.StatusBadRequest)
+			log.Printf("Error parsing new end time: %v", err)
+			return
+		}
+
+		// Ensure the new end time is after the new start time
+		if newEndTime.Before(newStartTime) {
+			http.Error(w, "End time must be after start time", http.StatusBadRequest)
+			return
+		}
+
+		// Calculate the new duration and total amount
+		duration := newEndTime.Sub(newStartTime).Hours()
+		hours := int(math.Ceil(duration))
+		if hours <= 0 {
+			http.Error(w, "Invalid duration calculated", http.StatusBadRequest)
+			return
+		}
+
+		fixedCost := 10.00
+		totalAmount := float64(hours) * fixedCost
+
+		// Fetch discount_percentage from promotions table
+		var discountPercentage float64
+		err = db.QueryRow(`
+			SELECT discount_percentage 
+			FROM promotions 
+			WHERE expiry_date >= NOW() 
+			ORDER BY expiry_date ASC 
+			LIMIT 1`,
+		).Scan(&discountPercentage)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				// No promotion found, discount remains 0
+				discountPercentage = 0.0
+			} else {
+				log.Printf("Error fetching discount: %v", err)
+				http.Error(w, "Error fetching promotion", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		// Apply discount from membership tier to the total amount
+		discountAmount := totalAmount * (discountRate / 100)
+		totalAmount -= discountAmount
+		// Apply discount from promotion to the total amount
+		discountAmount2 := totalAmount * (discountPercentage / 100)
+		totalAmount -= discountAmount2
+
+		// Update the booking with the new start and end times
+		result, err := db.Exec(`
+	        UPDATE bookings
+	        SET start_time = ?, end_time = ?
+	        WHERE booking_id = ? AND user_id = ?`,
+			input.StartTime, input.EndTime, bookingID, userId)
+		if err != nil {
+			http.Error(w, "Error modifying booking", http.StatusInternalServerError)
+			log.Printf("Error updating booking: %v", err)
+			return
+		}
+
+		// Check if any rows were affected
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			http.Error(w, "Error checking update result", http.StatusInternalServerError)
+			log.Printf("Error retrieving affected rows: %v", err)
+			return
+		}
+		if rowsAffected == 0 {
+			http.Error(w, "No changes made to the booking. Check input values.", http.StatusBadRequest)
+			log.Printf("No rows updated for booking_id: %s, user_id: %s", bookingID, userId)
+			return
+		}
+
+		// Update the billing record
+		_, err = db.Exec(`
+	        UPDATE billings
+	        SET total_amount = ?
+	        WHERE booking_id = ?`,
+			totalAmount, bookingID)
+		if err != nil {
+			http.Error(w, "Error updating billing entry", http.StatusInternalServerError)
+			log.Printf("Error updating billing record: %v", err)
+			return
+		}
+	} // End here
+
+	// Send response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Booking modified successfully"})
@@ -893,6 +1192,35 @@ func cancelBookingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if the booking is already within its start and end date
+	var startDate, endDate string
+	err2 := db.QueryRow(`
+        SELECT start_time, end_time 
+        FROM bookings 
+        WHERE booking_id = ? AND user_id = ?`,
+		bookingID, userId).Scan(&startDate, &endDate)
+	if err2 != nil {
+		if err2 == sql.ErrNoRows {
+			http.Error(w, "Booking not found or unauthorized", http.StatusNotFound)
+			log.Printf("Booking not found: %v", err2)
+			return
+		}
+		http.Error(w, "Error fetching booking details", http.StatusInternalServerError)
+		log.Printf("Error fetching booking details: %v", err2)
+		return
+	}
+
+	// Parse dates to compare with the current time
+	currentTime := time.Now()
+	start, _ := time.Parse(time.RFC3339, startDate)
+	end, _ := time.Parse(time.RFC3339, endDate)
+
+	if currentTime.After(start) && currentTime.Before(end) {
+		http.Error(w, "Booking cannot be canceled as it is currently active", http.StatusBadRequest)
+		log.Printf("Attempted to cancel an active booking: bookingID=%s, userID=%s", bookingID, userId)
+		return
+	}
+
 	// Update vehicle status to 'Available'
 	_, err := db.Exec(`UPDATE vehicles SET status = "Available" WHERE vehicle_id = (
         SELECT vehicle_id FROM bookings WHERE booking_id = ?
@@ -902,7 +1230,26 @@ func cancelBookingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = db.Exec(`DELETE FROM bookings WHERE booking_id = ? AND user_id = ?`, bookingID, userId)
+	// Delete the billing record associated with the booking
+	/* _, err = db.Exec(`DELETE FROM billings WHERE booking_id = ?`, bookingID)
+	if err != nil {
+		http.Error(w, "Error deleting billing information", http.StatusInternalServerError)
+		log.Printf("Error deleting billing record: %v", err)
+		return
+	} */
+	_, err = db.Exec(`UPDATE billings SET payment_status = "Refunded", total_amount = 0.00 WHERE booking_id = ?`, bookingID)
+	if err != nil {
+		http.Error(w, "Error updating billing information", http.StatusInternalServerError)
+		log.Printf("Error updating billing record: %v", err)
+		return
+	}
+
+	/* _, err = db.Exec(`DELETE FROM bookings WHERE booking_id = ? AND user_id = ?`, bookingID, userId)
+	if err != nil {
+		http.Error(w, "Error updating vehicle status", http.StatusInternalServerError)
+		return
+	} */
+	_, err = db.Exec(`UPDATE bookings SET status = "Cancelled" WHERE booking_id = ? AND user_id = ?`, bookingID, userId)
 	if err != nil {
 		http.Error(w, "Error updating vehicle status", http.StatusInternalServerError)
 		return
@@ -934,57 +1281,85 @@ func updateVehicleStatusHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "Vehicle status updated successfully"})
 }
 
-func ProcessPayment(amount int, paymentMethodID string) (string, error) {
-	stripe.Key = "sk_test_4eC39HqLyjWDarjtT1zdp7dc" // Set your Stripe Secret Key
-
-	params := &stripe.PaymentIntentParams{
-		Amount:        stripe.Int64(int64(amount)),
-		Currency:      stripe.String(string(stripe.CurrencyUSD)),
-		PaymentMethod: stripe.String(paymentMethodID),
-		Confirm:       stripe.Bool(true),
+// FetchBillingHandler retrieves billing information.
+func fetchBillingHandler(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("user_id")
+	if userID == "" {
+		http.Error(w, "Booking ID is required", http.StatusBadRequest)
+		return
 	}
 
-	paymentIntent, err := paymentintent.New(params)
+	rows, err := db.Query(`
+		SELECT 
+			bi.billing_id, bi.booking_id, bi.payment_status, bi.payment_method, bi.total_amount, bi.created_at, bi.updated_at
+		FROM 
+			billings bi
+		INNER JOIN
+			bookings b
+		ON
+			bi.booking_id = b.booking_id
+		WHERE 
+			b.user_id = ?`, userID)
 	if err != nil {
-		return "", err
+		http.Error(w, "Failed to fetch billing information", http.StatusInternalServerError)
+		log.Printf("Error querying database: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var billings []map[string]interface{}
+	for rows.Next() {
+		var billingID, bookingID, paymentStatus, paymentMethod, createdAtStr, updatedAtStr string
+		var totalAmount float64
+
+		if err := rows.Scan(&billingID, &bookingID, &paymentStatus, &paymentMethod, &totalAmount, &createdAtStr, &updatedAtStr); err != nil {
+			log.Printf("Row scan error: %v", err)
+			http.Error(w, "Error scanning billing data", http.StatusInternalServerError)
+			return
+		}
+
+		// Parse and format created_at and updated_at
+		createdAt, err := time.Parse("2006-01-02 15:04:05", createdAtStr)
+		if err != nil {
+			log.Printf("Error parsing created_at: %v", err)
+			http.Error(w, "Error parsing created at time", http.StatusInternalServerError)
+			return
+		}
+
+		updatedAt, err := time.Parse("2006-01-02 15:04:05", updatedAtStr)
+		if err != nil {
+			log.Printf("Error parsing updated_at: %v", err)
+			http.Error(w, "Error parsing updated at time", http.StatusInternalServerError)
+			return
+		}
+
+		formattedCreatedAt := createdAt.Format("2006-01-02 15:04:05")
+		formattedUpdatedAt := updatedAt.Format("2006-01-02 15:04:05")
+
+		// Log the billing details
+		log.Printf("Billing ID: %s, Booking ID: %s, Payment Status: %s, Payment Method: %s, Total Amount: %.2f, Created At: %s, Updated At: %s",
+			billingID, bookingID, paymentStatus, paymentMethod, totalAmount, formattedCreatedAt, formattedUpdatedAt)
+
+		billing := map[string]interface{}{
+			"billing_id":     billingID,
+			"booking_id":     bookingID,
+			"payment_status": paymentStatus,
+			"payment_method": paymentMethod,
+			"total_amount":   totalAmount,
+			"created_at":     formattedCreatedAt,
+			"updated_at":     formattedUpdatedAt,
+		}
+
+		billings = append(billings, billing)
 	}
 
-	return paymentIntent.ID, nil
-}
-
-func RefundPayment(paymentIntentID string) (string, error) {
-	params := &stripe.RefundParams{
-		PaymentIntent: stripe.String(paymentIntentID),
+	if len(billings) == 0 {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode([]map[string]interface{}{})
+		return
 	}
 
-	refund, err := refund.New(params)
-	if err != nil {
-		return "", err
-	}
-
-	return refund.ID, nil
-}
-
-func GenerateInvoice(rentalID int, totalAmount float64) error {
-	pdf := gofpdf.New("P", "mm", "A4", "")
-	pdf.AddPage()
-
-	pdf.SetFont("Arial", "B", 16)
-	pdf.Cell(40, 10, "Invoice")
-	pdf.Ln(10)
-
-	// Add rental and cost details
-	pdf.SetFont("Arial", "", 12)
-	pdf.Cell(40, 10, fmt.Sprintf("Rental ID: %d", rentalID))
-	pdf.Ln(10)
-	pdf.Cell(40, 10, fmt.Sprintf("Total Amount: $%.2f", totalAmount))
-
-	// Save or email the PDF
-	err := pdf.OutputFileAndClose(fmt.Sprintf("invoices/%d_invoice.pdf", rentalID))
-	if err != nil {
-		return err
-	}
-
-	// You can also send this file via email to the user using your email service
-	return nil
+	// Set content-type to application/json
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(billings)
 }
