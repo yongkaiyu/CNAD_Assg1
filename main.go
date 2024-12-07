@@ -774,12 +774,32 @@ func vehicleBookingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch the discount rate for the membership tier
+	// Fetch the discount rate and booking limit for the membership tier
 	var discountRate float64
-	err = db.QueryRow(`SELECT discount_rate FROM membershipbenefits WHERE tier = ?`, membershipTier).Scan(&discountRate)
+	var bookingLimit int
+	err = db.QueryRow(`SELECT discount_rate, booking_limit FROM membershipbenefits WHERE tier = ?`, membershipTier).Scan(&discountRate, &bookingLimit)
 	if err != nil {
 		log.Printf("Error fetching discount rate: %v", err)
 		http.Error(w, "Error fetching membership benefits", http.StatusInternalServerError)
+		return
+	}
+
+	// Count the number of existing bookings for the user
+	var existingBookings int
+	err = db.QueryRow(`
+		SELECT COUNT(*) 
+		FROM bookings 
+		WHERE user_id = ? AND status = 'Active'`,
+		userId).Scan(&existingBookings)
+	if err != nil {
+		log.Printf("Error counting user bookings: %v", err)
+		http.Error(w, "Error checking existing bookings", http.StatusInternalServerError)
+		return
+	}
+
+	// Check if the booking limit has been exceeded
+	if existingBookings > bookingLimit {
+		http.Error(w, "Booking limit exceeded. Upgrade your membership to increase the limit.", http.StatusForbidden)
 		return
 	}
 
