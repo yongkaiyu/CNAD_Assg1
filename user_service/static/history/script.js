@@ -51,8 +51,18 @@ function displayRentalHistory(rentals) {
             <p><strong>Total Cost:</strong> $${parseFloat(rental.total_cost).toFixed(2)}</p>
             <p><strong>Created At:</strong> ${new Date(rental.created_at).toLocaleString()}</p>
             <p><strong>Updated At:</strong> ${new Date(rental.updated_at).toLocaleString()}</p>
+            <button class="invoice-btn" data-booking-id="${rental.booking_id}">View Invoice</button>
         `;
 
         rentalHistoryDiv.appendChild(rentalDiv);
+    });
+
+    // Attach event listeners to each invoice button
+    document.querySelectorAll('.invoice-btn').forEach(button => {
+        button.addEventListener('click', function () {
+            const bookingId = this.dataset.bookingId;
+            window.location.href = `/static/invoice/`;
+            localStorage.setItem('bookingInvoiceId', bookingId)
+        });
     });
 }

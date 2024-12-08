@@ -15,10 +15,6 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/gorilla/mux"
-	_ "github.com/jung-kurt/gofpdf"
-	_ "github.com/stripe/stripe-go"
-	_ "github.com/stripe/stripe-go/paymentintent"
-	_ "github.com/stripe/stripe-go/refund"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -151,6 +147,7 @@ func main() {
 	router.HandleFunc("/api/v1/booking/status", updateVehicleStatusHandler)
 
 	router.HandleFunc("/api/v1/billing/bills", fetchBillingHandler)
+	router.HandleFunc("/api/v1/billing/invoice", rentalInvoiceHandler)
 
 	// Serve static files from /static/{page}/ and route them to the corresponding service folder
 	router.HandleFunc("/static/{page}/", serveStaticPage)
@@ -172,7 +169,7 @@ func serveStaticFile(w http.ResponseWriter, r *http.Request) {
 		filePath = "./user_service/static/" + page + "/" + file
 	case "vehicles_available", "vehicle_booking", "bookings_home", "modify_booking":
 		filePath = "./vehicle_service/static/" + page + "/" + file
-	case "billings_home", "payment":
+	case "billings_home", "invoice":
 		filePath = "./billing_service/static/" + page + "/" + file
 	default:
 		http.NotFound(w, r)
@@ -195,7 +192,7 @@ func serveStaticPage(w http.ResponseWriter, r *http.Request) {
 		filePath = "./user_service/static/" + page + "/index.html"
 	case "vehicles_available", "vehicle_booking", "bookings_home", "modify_booking":
 		filePath = "./vehicle_service/static/" + page + "/index.html"
-	case "billings_home", "payment":
+	case "billings_home", "invoice":
 		filePath = "./billing_service/static/" + page + "/index.html"
 	default:
 		http.Error(w, "Page not found", http.StatusNotFound)
@@ -495,8 +492,28 @@ func rentalHistoryHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := `SELECT booking_id, user_id, vehicle_id, start_time, end_time, status, total_cost, created_at, updated_at
-			  FROM bookings WHERE user_id = ? AND status = "Completed" ORDER BY updated_at DESC`
+	query := `SELECT 
+				b.booking_id, 
+				b.user_id, 
+				b.vehicle_id, 
+				b.start_time, 
+				b.end_time, 
+				b.status, 
+				bi.total_amount, 
+				b.created_at, 
+				b.updated_at
+			  FROM 
+			  	bookings b
+			  INNER JOIN
+			  	billings bi
+			  ON
+			  	b.booking_id = bi.booking_id
+			  WHERE 
+			  	user_id = ? 
+			  AND 
+			  	status = "Completed" 
+			  ORDER BY 
+			  	updated_at DESC`
 	rows, err := db.Query(query, userIDInt)
 	if err != nil {
 		http.Error(w, "Error retrieving rental history", http.StatusInternalServerError)
@@ -511,9 +528,9 @@ func rentalHistoryHandler(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var bookingID, userID, vehicleID, status string
 		var startTimeStr, endTimeStr, createdAtStr, updatedAtStr string
-		var totalCost float64
+		var totalCost, totalAmount float64
 
-		if err := rows.Scan(&bookingID, &userID, &vehicleID, &startTimeStr, &endTimeStr, &status, &totalCost, &createdAtStr, &updatedAtStr); err != nil {
+		if err := rows.Scan(&bookingID, &userID, &vehicleID, &startTimeStr, &endTimeStr, &status, &totalAmount, &createdAtStr, &updatedAtStr); err != nil {
 			log.Printf("Row scan error: %v", err)
 			http.Error(w, "Error scanning rental data", http.StatusInternalServerError)
 			return
@@ -548,6 +565,9 @@ func rentalHistoryHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Error parsing updated at time", http.StatusInternalServerError)
 			return
 		}
+
+		// Set total_cost to the value from the billing table
+		totalCost = totalAmount
 
 		// Format time.Time back into database string format since GMT +8 is added to time value
 		formattedStartTime := startTime.Format("2006-01-02 15:04:05")
@@ -585,6 +605,8 @@ func rentalHistoryHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(rentals)
 }
+
+/* Vehicle Service Handlers */
 
 func availableVehiclesHandler(w http.ResponseWriter, r *http.Request) {
 
@@ -665,6 +687,24 @@ func getBookedVehiclesHandler(w http.ResponseWriter, r *http.Request) {
 	userIDInt, err := strconv.Atoi(userID)
 	if err != nil {
 		http.Error(w, "Invalid user ID format", http.StatusBadRequest)
+		return
+	}
+
+	// Update statuses of expired bookings and associated vehicles
+	updateQuery := `
+		UPDATE 
+			vehicles v
+		INNER JOIN 
+			bookings b ON v.vehicle_id = b.vehicle_id
+		SET 
+			v.status = 'Available',
+			b.status = 'Completed'
+		WHERE 
+			b.end_time < NOW() AND b.status = 'Active'
+	`
+	_, err = db.Exec(updateQuery)
+	if err != nil {
+		http.Error(w, "Error updating expired bookings", http.StatusInternalServerError)
 		return
 	}
 
@@ -1301,6 +1341,8 @@ func updateVehicleStatusHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "Vehicle status updated successfully"})
 }
 
+/* Billing Service Handlers */
+
 // FetchBillingHandler retrieves billing information.
 func fetchBillingHandler(w http.ResponseWriter, r *http.Request) {
 	userID := r.URL.Query().Get("user_id")
@@ -1382,4 +1424,86 @@ func fetchBillingHandler(w http.ResponseWriter, r *http.Request) {
 	// Set content-type to application/json
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(billings)
+}
+
+func rentalInvoiceHandler(w http.ResponseWriter, r *http.Request) {
+	// Get the booking ID from the query parameters
+	bookingID := r.URL.Query().Get("booking_id")
+
+	if bookingID == "" {
+		http.Error(w, "Booking ID is required", http.StatusBadRequest)
+		return
+	}
+
+	query := `SELECT 
+				b.booking_id, 
+				b.user_id, 
+				b.vehicle_id, 
+				b.start_time, 
+				b.end_time, 
+				b.status, 
+				bi.total_amount, 
+				b.created_at, 
+				b.updated_at 
+			  FROM 
+			  	bookings b
+			  INNER JOIN
+			  	billings bi
+			  ON
+			  	b.booking_id = bi.booking_id
+			  WHERE 
+			  	b.booking_id = ? 
+			  AND 
+			  	b.status = "Completed" 
+			  ORDER BY 
+			  	b.updated_at DESC`
+
+	var booking map[string]interface{}
+	var userID, vehicleID, status, startTimeStr, endTimeStr, createdAtStr, updatedAtStr string
+	var totalCost, totalAmount float64
+
+	err := db.QueryRow(query, bookingID).Scan(&bookingID, &userID, &vehicleID, &startTimeStr, &endTimeStr, &status, &totalAmount, &createdAtStr, &updatedAtStr)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "Booking not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "Error retrieving booking data", http.StatusInternalServerError)
+		return
+	}
+
+	// Set total_cost to the value from the billing table
+	totalCost = totalAmount
+
+	// Parse dates
+	startTime, _ := time.Parse("2006-01-02 15:04:05", startTimeStr)
+	endTime, _ := time.Parse("2006-01-02 15:04:05", endTimeStr)
+	createdAt, _ := time.Parse("2006-01-02 15:04:05", createdAtStr)
+	updatedAt, _ := time.Parse("2006-01-02 15:04:05", updatedAtStr)
+
+	// Format time.Time back into database string format since GMT +8 is added to time value
+	formattedStartTime := startTime.Format("2006-01-02 15:04:05")
+	formattedEndTime := endTime.Format("2006-01-02 15:04:05")
+	formattedCreatedAt := createdAt.Format("2006-01-02 15:04:05")
+	formattedUpdatedAt := updatedAt.Format("2006-01-02 15:04:05")
+
+	// Get the current time for generated_at
+	generatedAt := time.Now()
+
+	// Format response
+	booking = map[string]interface{}{
+		"booking_id":   bookingID,
+		"user_id":      userID,
+		"vehicle_id":   vehicleID,
+		"start_time":   formattedStartTime,
+		"end_time":     formattedEndTime,
+		"status":       status,
+		"total_cost":   totalCost,
+		"created_at":   formattedCreatedAt,
+		"updated_at":   formattedUpdatedAt,
+		"generated_at": generatedAt,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(booking)
 }
